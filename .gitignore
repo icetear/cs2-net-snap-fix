@@ -1,0 +1,13 @@
+# Build output
+patcher/bin/
+patcher/obj/
+
+# Never commit game files (copyright Colossal Order) or locally built/patched binaries
+Game.dll
+Game.dll.patched
+Game.dll.orig
+*.orig
+lib_burst_generated.dll*
+
+# macOS
+.DS_Store
