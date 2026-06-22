@@ -73,14 +73,17 @@ CS2_DATA="/path/to/Cities Skylines II/Cities2_Data" ./install.sh
 ```
 
 ## After a game update
-Steam overwrites `Game.dll` on updates and on "Verify integrity of game files". Re-apply:
+Steam overwrites `Game.dll` on updates and on "Verify integrity of game files". Just re-apply:
 ```sh
-./uninstall.sh    # optional, if an old backup is in the way
 ./patch.sh        # re-patch the fresh original
-./install.sh
+./install.sh      # refreshes the Game.dll.orig backup to the new original
 ```
-`patch.sh` re-derives everything from your current `Game.dll`, so it adapts to new game versions
-(as long as the relevant types/methods still exist).
+`patch.sh`/`install.sh` auto-detect whether the installed `Game.dll` is a fresh original or already our
+patch, and pull the source/backup accordingly — a stale `Game.dll.orig` left over from a previous
+version can no longer poison the build. `install.sh` also refuses to install a patch that was built from
+a different game version (it records the source hash in `Game.dll.patched.srchash`). `patch.sh`
+re-derives the system list from your current `Game.dll`, so it adapts to new versions (as long as the
+relevant types still exist).
 
 ## How it's built (for the curious)
 `patcher/` is a small [Mono.Cecil](https://github.com/jbevain/cecil) tool (.NET 9). `patch.sh` enumerates

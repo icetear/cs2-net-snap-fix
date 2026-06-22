@@ -7,6 +7,7 @@ Game.dll
 Game.dll.patched
 Game.dll.orig
 *.orig
+*.srchash
 lib_burst_generated.dll*
 
 # macOS
