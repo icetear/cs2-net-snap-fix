@@ -22,25 +22,37 @@ the managed path — this fixes the bug but costs **~50% FPS permanently** (the 
 runs without Burst).
 
 ## What this fix does
-Instead of disabling Burst permanently, it patches the managed assembly `Game.dll` so Burst is turned
-off **only while the Net tool is active**, and even then only for the network systems — everything else
-(traffic, pathfinding, citizens, rendering, …) keeps running on Burst.
+Instead of disabling Burst permanently, it patches the managed assembly `Game.dll` so that — **only
+while the Net tool is active** — just the network systems run managed, while everything else (traffic,
+pathfinding, citizens, rendering, the Unity engine systems) keeps running on Burst.
 
 Technically:
-- `NetToolSystem.OnStartRunning` sets `BurstCompiler.Options.EnableBurstCompilation = false`
-  (and a newly added `OnStopRunning` sets it back to `true`). The setter flips
-  `JobsUtility.JobCompilerEnabled`, so newly scheduled jobs run managed.
-- Every job-scheduling system **except** `Game.Net` / `Game.Tools` / `Game.Objects` gets its `OnUpdate`
-  wrapped in `try/finally` that **re-enables** Burst for that system's update and restores the previous
-  state afterwards (save/restore).
+- A static flag `NetToolSystem.s_ForceManaged` is set to `true` in `OnStartRunning` and back to `false`
+  in a newly added `OnStopRunning` — it simply marks "the Net tool is active".
+- Each network system (`Game.Net` / `Game.Tools` / `Game.Objects`) gets its `OnUpdate` wrapped so that,
+  while the flag is set, it turns `BurstCompiler.Options.EnableBurstCompilation` off for the duration of
+  that update, schedules its jobs as usual (in parallel), then **forces them to run via
+  `JobHandle.Complete()` while Burst is still off**, and finally restores the previous flag state.
 
-So while the Net tool is open, only the network-build systems run managed (that's where the faulty
-height logic lives → bug fixed), while the heavy systems stay on Burst → FPS stays good. When the tool
-is not active, Burst is fully on → no performance impact. `lib_burst_generated.dll` stays **enabled**.
+That last step is the key. `EnableBurstCompilation` only affects a job when it actually *executes*, and
+network jobs execute asynchronously — *after* the update returns. Just toggling the flag around the
+update (an earlier attempt) didn't work: the jobs ran later, back on Burst, and the bug returned. And
+forcing each job to run synchronously/single-threaded crashes parallel jobs. Completing them inside the
+`finally` runs them **right then, parallel-managed** — correct, and crash-free — before Burst is switched
+back on. Tool systems are completed via their returned `JobHandle`; other systems via `this.Dependency`.
+
+So while the Net tool is open, only the network jobs run managed (that's where the faulty height logic
+lives → bug fixed); simulation, rendering and the Unity engine systems stay on Burst → FPS stays good.
+When the tool is not active it's a no-op → zero performance impact. `lib_burst_generated.dll` stays
+**enabled**.
+
+A simpler **`smart` fallback** (`./patch.sh smart`) is also available: it just flips the *global* Burst
+flag while the tool is selected. It fixes the bug too, but makes the whole game run managed while the
+tool is open (~50% FPS), so use it only if the default misbehaves on your setup.
 
 The actual mistranslated SSE instruction was not isolated (not needed for the fix — the managed path is
-provably correct). The likely culprit is a `math.all(bool3)` reduction over a `float3` in
-`MathUtils.Intersect(Bounds3, Bounds3)` used during network node merging.
+provably correct). The culprit is a SIMD routine in the network height/geometry check that drops the Y
+lane, reached from one of the parallel network-build jobs.
 
 ## Requirements
 - macOS on Apple Silicon, CS2 via CrossOver (Mono scripting backend — the default for CS2).
@@ -78,19 +90,22 @@ Steam overwrites `Game.dll` on updates and on "Verify integrity of game files". 
 ./patch.sh        # re-patch the fresh original
 ./install.sh      # refreshes the Game.dll.orig backup to the new original
 ```
-`patch.sh`/`install.sh` auto-detect whether the installed `Game.dll` is a fresh original or already our
-patch, and pull the source/backup accordingly — a stale `Game.dll.orig` left over from a previous
-version can no longer poison the build. `install.sh` also refuses to install a patch that was built from
-a different game version (it records the source hash in `Game.dll.patched.srchash`). `patch.sh`
-re-derives the system list from your current `Game.dll`, so it adapts to new versions (as long as the
-relevant types still exist).
+`patch.sh`/`install.sh` auto-detect — via an **IL marker** in the assembly, not a byte compare — whether
+the installed `Game.dll` is a fresh original or already our patch, and pull the source/backup accordingly.
+This is robust even when you switch between the default and `smart` modes, and a stale or corrupt
+`Game.dll.orig` can no longer poison the build (a backup that is itself a patch is refused). `install.sh`
+also refuses to install a patch built from a different game version (it records the source hash in
+`Game.dll.patched.srchash`). `patch.sh` re-derives the system list from your current `Game.dll`, so it
+adapts to new versions (as long as the relevant types still exist).
 
 ## How it's built (for the curious)
 `patcher/` is a small [Mono.Cecil](https://github.com/jbevain/cecil) tool (.NET 9). `patch.sh` enumerates
-all ECS systems with `monodis`, excludes `Game.Net`/`Game.Tools`/`Game.Objects`, and asks the patcher's
-`smart` mode to: add the global Net-tool toggle and wrap the remaining job-scheduling systems'
-`OnUpdate` to re-enable Burst. Systems whose `OnUpdate` has its own try/catch, or that schedule no jobs,
-are skipped (safety + no benefit).
+the `Game.Net`/`Game.Tools`/`Game.Objects` systems with `monodis` and asks the patcher's `gated` mode to:
+add the `s_ForceManaged` flag plus the `OnStartRunning`/`OnStopRunning` toggle on `NetToolSystem`, and
+wrap each network system's job-scheduling `OnUpdate` with the flag-gated "disable Burst → schedule →
+complete-while-off → restore" logic described above (tool systems via their returned `JobHandle`, others
+via `this.Dependency`). Systems whose `OnUpdate` has its own try/catch are skipped (a nested try/finally
+would corrupt the IL). The `smart` fallback instead re-enables Burst on every *non*-network system.
 
 ## Caveats
 - Re-apply after every game update / Steam file verification.

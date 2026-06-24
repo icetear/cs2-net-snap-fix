@@ -2,16 +2,20 @@
 # Installs the fix: keeps Game.dll.orig in sync with the current original, copies in the patched dll,
 # and ensures Burst is enabled.  Override the game path if needed:  CS2_DATA="/path/.../Cities2_Data" ./install.sh
 #
-# Backup hardening: Game.dll.orig ALWAYS tracks the currently installed original.
+# Backup hardening: Game.dll.orig ALWAYS tracks the real original.
 #   - If the installed Game.dll is already our patch -> keep the existing backup (never back up a patch).
 #   - Otherwise the installed Game.dll is the current original -> (re)create the backup from it
 #     (this also captures a fresh original right after a game update).
-# It also refuses to install a Game.dll.patched that was built from a DIFFERENT game version.
+# Detection uses an IL marker (`ispatched`), NOT a byte compare against Game.dll.patched, so switching
+# modes (smart <-> default) can never misclassify a patched dll as the original and overwrite the backup.
+# It also refuses to install a Game.dll.patched built from a DIFFERENT game version.
 set -e
 HERE="${0:A:h}"
 CS2_DATA="${CS2_DATA:-$HOME/Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam/steamapps/common/Cities Skylines II/Cities2_Data}"
 MAN="$CS2_DATA/Managed"
 PLG="$CS2_DATA/Plugins/x86_64"
+export PATH="$PATH:$HOME/.dotnet/tools"
+export CS2_MANAGED="$MAN"
 
 if pgrep -fil "Cities2|Cities Skylines" 2>/dev/null | grep -qiv "pgrep"; then
   echo "ERROR: CS2 is running. Close it first."; exit 1
@@ -23,13 +27,22 @@ BACKUP="$MAN/Game.dll.orig"
 PATCHED="$HERE/Game.dll.patched"
 [ -f "$PATCHED" ] || { echo "ERROR: Game.dll.patched missing. Run ./patch.sh first."; exit 1; }
 
-# Keep the backup pointing at the current original.
-if cmp -s "$LIVE" "$PATCHED"; then
+# Patcher is used for the robust IL-marker patch detection.
+PATCHER="$HERE/patcher/bin/Release/net9.0/patcher.dll"
+[ -f "$PATCHER" ] || ( cd "$HERE/patcher" && dotnet build -c Release -v q )
+ispatched() { [ "$(dotnet "$PATCHER" ispatched "$1" 2>/dev/null | tail -1)" = "patched" ]; }
+
+# Keep the backup pointing at the real original.
+if ispatched "$LIVE"; then
   # installed Game.dll is already our patch -> the original lives only in the backup
   [ -f "$BACKUP" ] || { echo "ERROR: Game.dll is already patched but no Game.dll.orig backup exists."; \
                         echo "Restore the original via Steam 'Verify integrity of game files', then re-run."; exit 1; }
+  if ispatched "$BACKUP"; then
+    echo "ERROR: backup Game.dll.orig is itself patched (corrupt backup)."
+    echo "Restore the original via Steam 'Verify integrity of game files' (restores the real Game.dll), then re-run."; exit 1
+  fi
   ORIG="$BACKUP"
-  echo "Game.dll is already patched; keeping existing backup."
+  echo "Game.dll is already patched; keeping existing (original) backup."
 else
   # installed Game.dll is the current original -> refresh the backup from it
   cp "$LIVE" "$BACKUP"
