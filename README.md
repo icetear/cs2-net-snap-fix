@@ -1,5 +1,16 @@
 # CS2 Net-Snap Fix (Apple Silicon / Rosetta / CrossOver)
 
+> ## 👉 Recommended: use [alien-agent/cs2-macos-patcher](https://github.com/alien-agent/cs2-macos-patcher) instead
+>
+> That project fixes **all** the known macOS/CrossOver problems in Cities: Skylines II — not just this one.
+> Alongside the elevated-network snap bug (which it fixes with the **same approach** as this repo, and
+> credits this repo for finding the root cause), it also fixes Paradox Mods downloads, mod
+> loading/installation, the pause-menu crash and spurious error dialogs. **If you just want a fully working
+> game on Apple Silicon, use theirs** — it's a superset of this fix.
+>
+> This repository stays up as the **focused, standalone fix for the snap bug only**, and as the place where
+> the root cause was originally tracked down.
+
 Fixes the bug where **elevated networks (bridges, power lines, water pipes) snap down onto the
 structure below them** in Cities: Skylines II — because the vertical (Y / height) check is ignored
 (it behaves purely 2D). Affects CS2 running on Apple Silicon Macs via CrossOver/Rosetta 2.
@@ -29,10 +40,14 @@ pathfinding, citizens, rendering, the Unity engine systems) keeps running on Bur
 Technically:
 - A static flag `NetToolSystem.s_ForceManaged` is set to `true` in `OnStartRunning` and back to `false`
   in a newly added `OnStopRunning` — it simply marks "the Net tool is active".
-- Each network system (`Game.Net` / `Game.Tools` / `Game.Objects`) gets its `OnUpdate` wrapped so that,
-  while the flag is set, it turns `BurstCompiler.Options.EnableBurstCompilation` off for the duration of
-  that update, schedules its jobs as usual (in parallel), then **forces them to run via
-  `JobHandle.Complete()` while Burst is still off**, and finally restores the previous flag state.
+- Each targeted network system gets its `OnUpdate` wrapped so that, while the flag is set, it turns
+  `BurstCompiler.Options.EnableBurstCompilation` off for the duration of that update, schedules its jobs as
+  usual (in parallel), then **forces them to run via `JobHandle.Complete()` while Burst is still off**, and
+  finally restores the previous flag state. By default only the three systems that actually compute the
+  snap/height math are wrapped — `NetToolSystem`, `CourseSplitSystem` and `ValidationSystem` (the confirmed
+  minimal set; `NetToolSystem` alone is not enough in-game). Wrapping just these three, rather than every
+  `Game.Net`/`Game.Tools`/`Game.Objects` system, avoids dozens of forced main-thread completes per frame
+  while building. Set `CS2_NETSNAP_EXTRA="Type,..."` to add systems, or `CS2_NETSNAP_FULL=1` to wrap them all.
 
 That last step is the key. `EnableBurstCompilation` only affects a job when it actually *executes*, and
 network jobs execute asynchronously — *after* the update returns. Just toggling the flag around the
@@ -95,12 +110,16 @@ the installed `Game.dll` is a fresh original or already our patch, and pull the 
 This is robust even when you switch between the default and `smart` modes, and a stale or corrupt
 `Game.dll.orig` can no longer poison the build (a backup that is itself a patch is refused). `install.sh`
 also refuses to install a patch built from a different game version (it records the source hash in
-`Game.dll.patched.srchash`). `patch.sh` re-derives the system list from your current `Game.dll`, so it
-adapts to new versions (as long as the relevant types still exist).
+`Game.dll.patched.srchash`). By default `patch.sh` targets the fixed minimal system list, which stays
+valid across versions as long as those three types still exist; if a future version moves the snap math
+elsewhere, use `CS2_NETSNAP_EXTRA=...` or `CS2_NETSNAP_FULL=1` (which re-derives the full list from your
+current `Game.dll`).
 
 ## How it's built (for the curious)
-`patcher/` is a small [Mono.Cecil](https://github.com/jbevain/cecil) tool (.NET 9). `patch.sh` enumerates
-the `Game.Net`/`Game.Tools`/`Game.Objects` systems with `monodis` and asks the patcher's `gated` mode to:
+`patcher/` is a small [Mono.Cecil](https://github.com/jbevain/cecil) tool (.NET 9). By default `patch.sh`
+passes the three snap systems (`NetToolSystem`, `CourseSplitSystem`, `ValidationSystem`) — extendable via
+`CS2_NETSNAP_EXTRA`, or `CS2_NETSNAP_FULL=1` to enumerate every `Game.Net`/`Game.Tools`/`Game.Objects`
+system with `monodis` as before — and asks the patcher's `gated` mode to:
 add the `s_ForceManaged` flag plus the `OnStartRunning`/`OnStopRunning` toggle on `NetToolSystem`, and
 wrap each network system's job-scheduling `OnUpdate` with the flag-gated "disable Burst → schedule →
 complete-while-off → restore" logic described above (tool systems via their returned `JobHandle`, others

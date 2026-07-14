@@ -3,10 +3,14 @@
 # Requirements: .NET 9 SDK (`dotnet`) and Mono (`monodis`).  (Install: `brew install --cask dotnet-sdk` + `brew install mono`)
 #
 # Modes:
-#   ./patch.sh          performant fix (default): Burst stays ON globally. Only the network systems
-#                       (Game.Net / Game.Tools / Game.Objects) run managed while the Net tool is active,
-#                       and their jobs are forced to complete WHILE Burst is still off, so they execute
-#                       parallel-managed (correct) -> snap bug fixed, and simulation/rendering keep full FPS.
+#   ./patch.sh          performant fix (default): Burst stays ON globally. Only the three network systems
+#                       that compute the snap/height math (NetToolSystem, CourseSplitSystem, ValidationSystem)
+#                       run managed while the Net tool is active, and their jobs are forced to complete WHILE
+#                       Burst is still off, so they execute parallel-managed (correct) -> snap bug fixed, and
+#                       simulation/rendering keep full FPS.
+#                       Escalation without editing this script:
+#                         CS2_NETSNAP_EXTRA="Game.Tools.FooSystem,..." ./patch.sh   # add more systems
+#                         CS2_NETSNAP_FULL=1 ./patch.sh                             # wrap ALL Game.Net/Tools/Objects
 #   ./patch.sh smart    fallback: a global Burst toggle while the tool is active. Simpler, but it makes the
 #                       whole game run managed while the Net tool is selected (~50% FPS). Use only if the
 #                       default misbehaves on your setup.
@@ -62,11 +66,25 @@ if [ "$MODE" = "smart" ]; then
   echo "Mode: smart (fallback) | systems re-enabled to Burst: $(echo "$LIST" | tr ',' '\n' | grep -c .)"
   dotnet "$PATCHER" smart "$ORIG" "$PATCHED" "$LIST" | tail -2
 else
-  # The 3 network namespaces are targeted directly (inverse of smart): Burst stays on globally and only
-  # these run managed while the tool is active, completed while Burst is off (parallel-managed).
-  LIST=$(monodis --typedef "$ORIG" 2>/dev/null \
-    | grep -oE "Game\.(Net|Tools|Objects)\.[A-Za-z]+System \(" \
-    | sed 's/ (//' | grep -vE "/" | sort -u | paste -sd, -)
+  # Performant (gated) fix. Only the network systems that actually compute the snap/height math run
+  # managed, and only while the Net tool is active; their jobs are completed inside the finally WHILE
+  # Burst is still off, so they execute parallel-managed (correct). Everything else stays on Burst.
+  #
+  # System list = the confirmed minimal set: NetToolSystem + CourseSplitSystem (the CourseHeight* jobs) +
+  # ValidationSystem. NetToolSystem alone is NOT enough in-game. Wrapping just these three (instead of all
+  # ~108 Game.Net/Tools/Objects *System types) avoids dozens of forced main-thread .Complete()/frame while
+  # building -> noticeably smoother, same fix result. (Matches alien-agent/cs2-macos-patcher's findings.)
+  if [ "${CS2_NETSNAP_FULL:-0}" = "1" ]; then
+    # Escalation: if a future game version moves the snap math into a different network system, the full
+    # filter covers every Game.Net/Tools/Objects *System (more sync while building, but broader coverage).
+    LIST=$(monodis --typedef "$ORIG" 2>/dev/null \
+      | grep -oE "Game\.(Net|Tools|Objects)\.[A-Za-z]+System \(" \
+      | sed 's/ (//' | grep -vE "/" | sort -u | paste -sd, -)
+  else
+    LIST="Game.Tools.NetToolSystem,Game.Tools.CourseSplitSystem,Game.Tools.ValidationSystem"
+    # Add extra systems without editing this script: CS2_NETSNAP_EXTRA="Full.Type.Name,..."
+    [ -n "${CS2_NETSNAP_EXTRA:-}" ] && LIST="$LIST,$CS2_NETSNAP_EXTRA"
+  fi
   echo "Mode: performant (default) | network systems: $(echo "$LIST" | tr ',' '\n' | grep -c .)"
   dotnet "$PATCHER" gated "$ORIG" "$PATCHED" "$LIST" | tail -2
 fi
